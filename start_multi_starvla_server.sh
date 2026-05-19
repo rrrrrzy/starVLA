@@ -3,12 +3,13 @@ set -euo pipefail
 
 BASE=/inspire/qb-ilm2/project/26summer-camp-10/26220056
 REPO=$BASE/starVLA
+export REPO
 
 TIMESTAMP=$(date +%Y%m%d%H%M)
 LOG_BASE=$REPO/log/$TIMESTAMP
 LOG_DIR=$LOG_BASE/starVLA
 
-CKPT=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/ckpt/v0519/qwen35_2b_pi_calvin_abc_multiview_20260518_174511/checkpoints/steps_20000_pytorch_model.pt
+CKPT=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/ckpt/v0519/qwen35_2b_gr00t_calvin_abc_multiview_d_style_ft_20260519_084009/checkpoints/steps_2000_pytorch_model.pt
 
 # 使用哪些 GPU
 GPUS=(0 1 2 3 4 5 6 7)
@@ -40,6 +41,10 @@ for idx in "${!GPUS[@]}"; do
 source $BASE/.venvs/starVLA/bin/activate
 cd \$REPO
 
+export CUDA_DEVICE_ORDER=PCI_BUS_ID
+export PYTORCH_CUDA_ALLOC_CONF=\${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
+export STARVLA_QWEN_ATTN_IMPL=\${STARVLA_QWEN_ATTN_IMPL:-sdpa}
+
 CUDA_VISIBLE_DEVICES=$GPU python -u deployment/model_server/server_policy.py \
     --ckpt_path $CKPT \
     --port $PORT \
@@ -51,6 +56,24 @@ CUDA_VISIBLE_DEVICES=$GPU python -u deployment/model_server/server_policy.py \
 
     echo "[OK] GPU=$GPU PORT=$PORT PID=$PID"
     echo "     Log: $LOG_FILE"
+
+    # Wait for this server to be listening before launching the next one.
+    # Model load is memory and CUDA-context heavy; serial startup makes logs
+    # easier to interpret and avoids avoidable driver pressure.
+    if [ "$idx" -lt $(( ${#GPUS[@]} - 1 )) ]; then
+        echo "     Waiting for server to be ready..."
+        for i in $(seq 1 300); do
+            if grep -q "server listening" "$LOG_FILE" 2>/dev/null; then
+                echo "     Server ready after ${i}s"
+                break
+            fi
+            if ! ps -p "$PID" > /dev/null 2>&1; then
+                echo "     [ERROR] Server process died!"
+                break
+            fi
+            sleep 1
+        done
+    fi
 done
 
 echo

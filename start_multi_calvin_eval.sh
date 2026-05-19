@@ -10,7 +10,7 @@ LOG_DIR=$LOG_BASE/calvin
 RUN_DIR=$BASE/runs/calvin_parallel
 SPLIT_DIR=$RUN_DIR/eval_splits
 
-CKPT=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/ckpt/v0519/qwen35_2b_pi_calvin_abc_multiview_20260518_174511/checkpoints/steps_20000_pytorch_model.pt
+CKPT=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/ckpt/v0519/qwen35_2b_gr00t_calvin_abc_multiview_d_style_ft_20260519_084009/checkpoints/steps_2000_pytorch_model.pt
 DATASET_PATH=/inspire/qb-ilm2/project/26summer-camp-10/26220056/calvin/dataset/calvin_debug_dataset
 CALVIN_CONFIG_PATH=/inspire/qb-ilm2/project/26summer-camp-10/26220056/calvin/calvin_models/conf
 SOURCE_EVAL_SEQUENCES=$REPO/examples/calvin/eval_files/eval_sequences.json
@@ -25,7 +25,7 @@ NUM_WORKERS=${#GPUS[@]}
 
 # 调试时可以设成 10；正式跑全量就改成空：
 # LIMIT_SEQUENCES=""
-LIMIT_SEQUENCES=100
+LIMIT_SEQUENCES=1000
 
 mkdir -p "$LOG_DIR" "$RUN_DIR" "$SPLIT_DIR"
 
@@ -83,7 +83,7 @@ for idx in "${!GPUS[@]}"; do
 
     echo "[START] worker=$idx GPU=$GPU PORT=$PORT NUM_SEQUENCES=$NUM_SEQUENCES"
 
-    nohup bash -lc "
+    setsid bash -lc "
 source $BASE/env_calvin.sh
 
 # 每个 worker 用独立工作目录，避免 tmp/calvin/eval_logs 互相覆盖

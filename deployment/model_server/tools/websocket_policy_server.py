@@ -46,6 +46,8 @@ class WebsocketPolicyServer:
             self._port,
             compression=None,
             max_size=None,
+            ping_interval=None,
+            ping_timeout=60,
         ) as server:
             if self._idle_timeout > 0:
                 await self._idle_watchdog(server)
@@ -72,7 +74,11 @@ class WebsocketPolicyServer:
             try:
                 msg = msgpack_numpy.unpackb(await websocket.recv())
                 self._last_active = time.time()  # Refresh active time on each received message
-                ret = self._route_message(msg)  # route message
+                # Policy inference is a long, synchronous CUDA call.  Running it
+                # on the asyncio event loop blocks websocket keepalive handling,
+                # which makes clients close with 1011 ping timeouts before a
+                # slow multi-GPU inference can return.
+                ret = await asyncio.to_thread(self._route_message, msg)
                 await websocket.send(packer.pack(ret))
             except websockets.ConnectionClosed:
                 logging.info(f"Connection from {websocket.remote_address} closed")

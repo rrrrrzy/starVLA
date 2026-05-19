@@ -56,11 +56,16 @@ class _QWen3_5_VL_Interface(nn.Module):
 
         qwenvl_config = config.framework.get("qwenvl", {})
         model_id = qwenvl_config.get("base_vlm", "Qwen/Qwen3.5-VL-4B-Instruct")
-        attn_implementation = qwenvl_config.get("attn_implementation", "sdpa")
+        config_attn = qwenvl_config.get("attn_implementation", "sdpa")
 
-        # Environment variable override: STARVLA_QWEN_ATTN_IMPL=sdpa|flash_attention_2
+        # Default to sdpa: flash_attention_2 is unstable with Qwen3.5 + H200 + bf16
+        # (causes CUDA illegal instruction in both vision encoder and language model).
+        # Override with STARVLA_QWEN_ATTN_IMPL=flash_attention_2 if needed.
         import os
-        attn_implementation = os.environ.get("STARVLA_QWEN_ATTN_IMPL", attn_implementation)
+        attn_implementation = os.environ.get("STARVLA_QWEN_ATTN_IMPL", "sdpa")
+        if attn_implementation == "sdpa" and config_attn == "flash_attention_2":
+            logger.info("Overriding attn_implementation from flash_attention_2 to sdpa "
+                        "(set STARVLA_QWEN_ATTN_IMPL=flash_attention_2 to force FA2)")
 
         # Fallback to sdpa if flash_attention_2 is requested but flash_attn is not installed
         if attn_implementation == "flash_attention_2":
@@ -69,19 +74,12 @@ class _QWen3_5_VL_Interface(nn.Module):
             except ImportError:
                 print("[WARNING] flash_attn not installed, falling back to sdpa")
                 attn_implementation = "sdpa"
-        # attn_implementation = "sdpa"
 
         model = Qwen3_5ForConditionalGeneration.from_pretrained(
             model_id,
             attn_implementation=attn_implementation,
             torch_dtype=torch.bfloat16,
         )
-
-        # Force vision encoder to use sdpa to avoid flash_attn_varlen_func instability
-        # on H200 + bf16 + flash_attn 2.7.4 (CUDA illegal instruction)
-        if attn_implementation == "flash_attention_2":
-            model.config.vision_config._attn_implementation = "sdpa"
-            logger.info("Vision encoder forced to sdpa (flash_attn_varlen_func unstable on H200+bf16)")
 
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
