@@ -38,13 +38,13 @@ from calvin_agent.evaluation.utils import (
     get_log_dir,
     print_and_save,
 )
-from moviepy.editor import ImageSequenceClip
 from omegaconf import OmegaConf
 from termcolor import colored
 from tqdm import tqdm
 
 from deployment.model_server.tools import image_tools
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+from examples.calvin.eval_files.video_utils import RolloutVideoRecorder
 
 # from calvin_env.envs.play_table_env import get_env
 
@@ -54,6 +54,11 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["MUJOCO_GL"] = "osmesa"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Video recording env vars
+CALVIN_SAVE_VIDEO = os.environ.get("CALVIN_SAVE_VIDEO", "0") == "1"
+CALVIN_VIDEO_CAMERA = os.environ.get("CALVIN_VIDEO_CAMERA", "rgb_static")
+CALVIN_VIDEO_DIR = os.environ.get("CALVIN_VIDEO_DIR", "")
 
 EP_LEN = 360  # Max steps per task
 
@@ -102,12 +107,13 @@ class CalvinPolicyClient:
         pretrained_path: str = "",
         unnorm_key: str = "",
     ):
+        # New ModelClient API: checkpoint is loaded by the StarVLA policy server.
+        # The client only connects to the websocket server and sends observations.
         self.client = ModelClient(
-            policy_ckpt_path=pretrained_path,
+            unnorm_key=(unnorm_key or None),
+            policy_setup="franka",
             host=host,
             port=port,
-            image_size=[resize_size, resize_size],
-            unnorm_key=(unnorm_key or None),
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
@@ -387,8 +393,21 @@ def rollout(
     policy.reset()
     start_info = env.get_info()
 
-    if debug:
-        img_queue = []
+    # Determine whether to record video for this rollout
+    record_video = CALVIN_SAVE_VIDEO or debug
+    if CALVIN_VIDEO_DIR:
+        video_dir = CALVIN_VIDEO_DIR
+    elif eval_log_dir:
+        video_dir = os.path.join(eval_log_dir, "videos")
+    else:
+        video_dir = None
+    recorder = RolloutVideoRecorder(
+        save_dir=video_dir,
+        fps=30,
+        camera=CALVIN_VIDEO_CAMERA,
+        enabled=record_video and video_dir is not None,
+    )
+    recorder.add_obs(obs)
 
     for step in range(EP_LEN):
 
@@ -400,9 +419,7 @@ def rollout(
         action[-1] = 1 if action[-1] > 0 else -1
 
         obs, _, _, current_info = env.step(action)
-        if debug:
-            img_copy = copy.deepcopy(obs["rgb_obs"]["rgb_static"])
-            img_queue.append(img_copy)
+        recorder.add_obs(obs)
         if step == 0:
             # for tsne plot, only if available
             collect_plan(policy, plans, subtask)
@@ -412,13 +429,11 @@ def rollout(
         if len(current_task_info) > 0:
             if debug:
                 print(colored("success", "green"), end=" ")
-                img_clip = ImageSequenceClip(img_queue, fps=30)
-                img_clip.write_gif(os.path.join(eval_log_dir, f"{sequence_i}-{subtask_i}-{subtask}-succ.gif"), fps=30)
+            recorder.save(f"seq{sequence_i}_sub{subtask_i}_{subtask}_succ")
             return True
     if debug:
         print(colored("fail", "red"), end=" ")
-        img_clip = ImageSequenceClip(img_queue, fps=30)
-        img_clip.write_gif(os.path.join(eval_log_dir, f"{sequence_i}-{subtask_i}-{subtask}-fail.gif"), fps=30)
+    recorder.save(f"seq{sequence_i}_sub{subtask_i}_{subtask}_fail")
     return False
 
 
