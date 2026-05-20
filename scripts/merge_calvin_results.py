@@ -43,6 +43,46 @@ def find_latest_log_dir(repo: Path) -> Path | None:
     return candidates[0] if candidates else None
 
 
+def merge_action_traces(log_dir: Path, output_path: Path):
+    trace_dir = log_dir / "action_traces"
+    trace_paths = sorted(trace_dir.glob("worker_*.jsonl"))
+    if not trace_paths:
+        return None
+
+    records = []
+    bad_lines = []
+    for trace_path in trace_paths:
+        with trace_path.open("r", encoding="utf-8", errors="ignore") as f:
+            for line_no, line in enumerate(f, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    bad_lines.append(
+                        {
+                            "path": str(trace_path),
+                            "line": line_no,
+                            "error": str(exc),
+                        }
+                    )
+
+    records.sort(key=lambda x: x.get("sequence_index_global", x.get("round", 0)))
+    payload = {
+        "total_records": len(records),
+        "records": records,
+        "bad_lines": bad_lines,
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False))
+    return {
+        "path": output_path,
+        "total_records": len(records),
+        "bad_lines": len(bad_lines),
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -199,6 +239,17 @@ def main():
     print()
     print(f"Saved to: {output_path}")
     print()
+
+    trace_output = output_path.parent / "action_traces.json"
+    trace_summary = merge_action_traces(log_dir, trace_output)
+    if trace_summary is not None:
+        print(
+            f"Merged action traces: {trace_summary['total_records']} records -> "
+            f"{trace_summary['path']}"
+        )
+        if trace_summary["bad_lines"]:
+            print(f"Action trace bad lines: {trace_summary['bad_lines']}")
+        print()
 
     if merged is not None:
         print("--- Copy to Excel ---")

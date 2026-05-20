@@ -6,11 +6,14 @@ REPO=$BASE/starVLA
 
 STORE=/inspire/qb-ilm2/project/26summer-camp-10/public/ten
 
-TIMESTAMP=$(date +%Y%m%d%H%M)
+TIMESTAMP=$(date +%Y%m%d%H%M%S)
 LOG_BASE=$STORE/log/$TIMESTAMP
 LOG_DIR=$LOG_BASE/calvin
 RUN_DIR=$BASE/runs/calvin_parallel
 SPLIT_DIR=$RUN_DIR/eval_splits
+ACTION_TRACE_DIR=$LOG_DIR/action_traces
+CALVIN_DATA_STORE=${CALVIN_DATA_STORE:-/inspire/qb-ilm2/project/26summer-camp-10/public/ten/calvin_data}
+CALVIN_LEROBOT_DATA_DIR=${CALVIN_LEROBOT_DATA_DIR:-$CALVIN_DATA_STORE/$TIMESTAMP}
 
 CKPT=/inspire/qb-ilm2/project/26summer-camp-10/26220056/starVLA/ten/qwen35_2b_cosmopredict2_gr00t_calvin_abc_multiview_20260519_112310/checkpoints/steps_10000_pytorch_model.pt
 DATASET_PATH=/inspire/qb-ilm2/project/26summer-camp-10/26220056/calvin/dataset/calvin_debug_dataset
@@ -41,7 +44,7 @@ NUM_WORKERS=${#GPUS[@]}
 # LIMIT_SEQUENCES=""
 LIMIT_SEQUENCES=1000
 
-mkdir -p "$LOG_DIR" "$RUN_DIR" "$SPLIT_DIR"
+mkdir -p "$LOG_DIR" "$RUN_DIR" "$SPLIT_DIR" "$ACTION_TRACE_DIR" "$CALVIN_LEROBOT_DATA_DIR"
 
 echo "[INFO] Splitting eval sequences..."
 
@@ -67,6 +70,7 @@ for idx in "${!GPUS[@]}"; do
 
     EVAL_SEQ="$SPLIT_DIR/eval_sequences_worker_${idx}.json"
     COUNT_FILE="$SPLIT_DIR/eval_sequences_worker_${idx}.count"
+    OFFSET_FILE="$SPLIT_DIR/eval_sequences_worker_${idx}.offset"
 
     if [ ! -f "$EVAL_SEQ" ]; then
         echo "[WARN] Missing split file: $EVAL_SEQ, skip worker $idx"
@@ -74,6 +78,11 @@ for idx in "${!GPUS[@]}"; do
     fi
 
     NUM_SEQUENCES=$(cat "$COUNT_FILE")
+    if [ -f "$OFFSET_FILE" ]; then
+        SEQUENCE_OFFSET=$(cat "$OFFSET_FILE")
+    else
+        SEQUENCE_OFFSET=0
+    fi
 
     if [ "$NUM_SEQUENCES" -le 0 ]; then
         echo "[SKIP] worker=$idx has 0 sequences"
@@ -85,6 +94,7 @@ for idx in "${!GPUS[@]}"; do
 
     LOG_FILE="$LOG_DIR/calvin_eval_worker${idx}_gpu${GPU}_port${PORT}.log"
     PID_FILE="$LOG_DIR/calvin_eval_worker${idx}_gpu${GPU}_port${PORT}.pid"
+    ACTION_TRACE_FILE="$ACTION_TRACE_DIR/worker_${idx}.jsonl"
 
     if [ -f "$PID_FILE" ]; then
         OLD_PID=$(cat "$PID_FILE")
@@ -95,7 +105,7 @@ for idx in "${!GPUS[@]}"; do
         fi
     fi
 
-    echo "[START] worker=$idx GPU=$GPU PORT=$PORT NUM_SEQUENCES=$NUM_SEQUENCES"
+    echo "[START] worker=$idx GPU=$GPU PORT=$PORT NUM_SEQUENCES=$NUM_SEQUENCES SEQUENCE_OFFSET=$SEQUENCE_OFFSET"
 
     # echo "        Waiting for server $HOST:$PORT ..."
     # for i in $(seq 1 600); do
@@ -150,7 +160,11 @@ python -u $REPO/examples/calvin/eval_files/eval_calvin.py \
     --args.dataset_path $DATASET_PATH \
     --args.calvin_config_path $CALVIN_CONFIG_PATH \
     --args.eval_sequences_path $EVAL_SEQ \
-    --args.num_sequences $NUM_SEQUENCES
+    --args.num_sequences $NUM_SEQUENCES \
+    --args.worker_id $idx \
+    --args.sequence_offset $SEQUENCE_OFFSET \
+    --args.action_trace_path $ACTION_TRACE_FILE \
+    --args.lerobot_data_dir $CALVIN_LEROBOT_DATA_DIR
 " > "$LOG_FILE" 2>&1 &
 
     PID=$!
@@ -165,5 +179,9 @@ echo "查看所有 eval："
 echo "ps aux | grep eval_calvin.py | grep -v grep"
 echo
 echo "日志目录: $LOG_DIR"
+echo "动作类型记录目录: $ACTION_TRACE_DIR"
+echo "LeRobot 测试数据目录: $CALVIN_LEROBOT_DATA_DIR"
+echo "合并 LeRobot metadata:"
+echo "python $REPO/scripts/merge_calvin_lerobot_dataset.py --root $CALVIN_LEROBOT_DATA_DIR"
 echo "查看日志，例如："
 echo "tail -f $LOG_DIR/calvin_eval_worker0_gpu${GPUS[0]}_port${BASE_PORT}.log"

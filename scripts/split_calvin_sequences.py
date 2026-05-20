@@ -54,6 +54,7 @@ def main():
     chunks = chunk_list(seqs, args.num_workers)
 
     manifest = []
+    offset = 0
     for i, chunk in enumerate(chunks):
         if wrapper_type == "list":
             out_data = chunk
@@ -63,17 +64,21 @@ def main():
 
         out_path = out_dir / f"eval_sequences_worker_{i}.json"
         count_path = out_dir / f"eval_sequences_worker_{i}.count"
+        offset_path = out_dir / f"eval_sequences_worker_{i}.offset"
 
         out_path.write_text(json.dumps(out_data, ensure_ascii=False, indent=2))
-        count_path.write_text(str(len(chunk)))
+        count_path.write_text(f"{len(chunk)}\n")
+        offset_path.write_text(f"{offset}\n")
 
         manifest.append(
             {
                 "worker": i,
                 "path": str(out_path),
                 "count": len(chunk),
+                "offset": offset,
             }
         )
+        offset += len(chunk)
 
     manifest_path = out_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2))
