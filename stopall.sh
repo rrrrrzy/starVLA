@@ -2,7 +2,8 @@
 set -euo pipefail
 
 REPO=$(cd "$(dirname "$0")" && pwd)
-LOG_BASE="$REPO/log"
+STORE=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/
+LOG_BASE="$STORE/log"
 
 if [ ! -d "$LOG_BASE" ]; then
     echo "[INFO] No log directory found: $LOG_BASE"

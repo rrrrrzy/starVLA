@@ -59,6 +59,7 @@ logger = logging.getLogger(__name__)
 CALVIN_SAVE_VIDEO = os.environ.get("CALVIN_SAVE_VIDEO", "0") == "1"
 CALVIN_VIDEO_CAMERA = os.environ.get("CALVIN_VIDEO_CAMERA", "rgb_static")
 CALVIN_VIDEO_DIR = os.environ.get("CALVIN_VIDEO_DIR", "")
+CALVIN_PROGRESS_EVERY = int(os.environ.get("CALVIN_PROGRESS_EVERY", "25"))
 
 EP_LEN = 360  # Max steps per task
 
@@ -410,15 +411,30 @@ def rollout(
     recorder.add_obs(obs)
 
     for step in range(EP_LEN):
+        if CALVIN_PROGRESS_EVERY > 0 and step % CALVIN_PROGRESS_EVERY == 0:
+            print(
+                f"[rollout] seq={sequence_i} sub={subtask_i} task={subtask} step={step} begin",
+                flush=True,
+            )
 
+        t_policy = time.time()
         action = policy.step(obs, lang_annotation)
+        policy_dt = time.time() - t_policy
 
         # Ensure action is writable (Calvin env modifies it in-place)
         if not action.flags.writeable:
             action = np.array(action, copy=True)
         action[-1] = 1 if action[-1] > 0 else -1
 
+        t_env = time.time()
         obs, _, _, current_info = env.step(action)
+        env_dt = time.time() - t_env
+        if CALVIN_PROGRESS_EVERY > 0 and step % CALVIN_PROGRESS_EVERY == 0:
+            print(
+                f"[rollout] seq={sequence_i} sub={subtask_i} task={subtask} step={step} "
+                f"policy_dt={policy_dt:.3f}s env_dt={env_dt:.3f}s",
+                flush=True,
+            )
         recorder.add_obs(obs)
         if step == 0:
             # for tsne plot, only if available
@@ -439,6 +455,13 @@ def rollout(
 
 def main(args: Args):
     # args = tyro.cli(Args)
+    print(
+        f"[calvin-config] CALVIN_SAVE_VIDEO={CALVIN_SAVE_VIDEO} "
+        f"CALVIN_VIDEO_DIR={CALVIN_VIDEO_DIR} "
+        f"CALVIN_VIDEO_CAMERA={CALVIN_VIDEO_CAMERA} "
+        f"CALVIN_PROGRESS_EVERY={CALVIN_PROGRESS_EVERY}",
+        flush=True,
+    )
 
     policy = CalvinPolicyClient(
         args.host,

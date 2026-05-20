@@ -5,11 +5,13 @@ BASE=/inspire/qb-ilm2/project/26summer-camp-10/26220056
 REPO=$BASE/starVLA
 export REPO
 
+STORE=/inspire/qb-ilm2/project/26summer-camp-10/public/ten
+
 TIMESTAMP=$(date +%Y%m%d%H%M)
-LOG_BASE=$REPO/log/$TIMESTAMP
+LOG_BASE=$STORE/log/$TIMESTAMP
 LOG_DIR=$LOG_BASE/starVLA
 
-CKPT=/inspire/qb-ilm2/project/26summer-camp-10/26220056/starVLA/ten/qwen35_2b_gr00t_calvin_abc_multiview_job-b82d046c-d876-441d-bb86-e1b9271fc940_round0_20260519_073006/checkpoints/steps_20000_pytorch_model.pt
+CKPT=/inspire/qb-ilm2/project/26summer-camp-10/26220056/starVLA/ten/qwen35_2b_cosmopredict2_gr00t_calvin_abc_multiview_20260519_112310/checkpoints/steps_10000_pytorch_model.pt
 #/inspire/qb-ilm2/project/26summer-camp-10/public/ten/ckpt/v0519/qwen35_2b_gr00t_calvin_abc_multiview_job-b82d046c-d876-441d-bb86-e1b9271fc940_round0_20260519_073006/checkpoints/steps_10000_pytorch_model.pt
 
 # 使用哪些 GPU。GPU0 保留给 Calvin EGL/PyBullet 渲染。

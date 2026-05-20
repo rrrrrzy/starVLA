@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import imageio.v2 as imageio
+import traceback
 
 
 def extract_rgb_frame(obs, camera="rgb_static"):
@@ -72,10 +73,16 @@ class RolloutVideoRecorder:
             return None
 
         path = self.save_dir / f"{name}.mp4"
-        imageio.mimsave(path, self.frames, fps=self.fps)
-        self.frames = []
-        print(f"[video] saved {path}")
-        return path
+        try:
+            imageio.mimsave(path, self.frames, fps=self.fps)
+            print(f"[video] saved {path}", flush=True)
+            return path
+        except Exception:
+            print(f"[video] failed to save {path}", flush=True)
+            traceback.print_exc()
+            return None
+        finally:
+            self.frames = []
 
     def clear(self):
         self.frames = []
