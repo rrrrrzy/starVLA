@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-BASE=/inspire/qb-ilm2/project/26summer-camp-10/26220056
+BASE=/inspire/qb-ilm2/project/26summer-camp-10/public/ten
 REPO=$BASE/starVLA
 
 STORE=/inspire/qb-ilm2/project/26summer-camp-10/public/ten
 
-TIMESTAMP=$(date +%Y%m%d%H%M%S)
+TIMESTAMP=$(date +%Y%m%d%H%M)
 LOG_BASE=$STORE/log/$TIMESTAMP
 LOG_DIR=$LOG_BASE/calvin
 RUN_DIR=$BASE/runs/calvin_parallel
@@ -15,9 +15,9 @@ ACTION_TRACE_DIR=$LOG_DIR/action_traces
 CALVIN_DATA_STORE=${CALVIN_DATA_STORE:-/inspire/qb-ilm2/project/26summer-camp-10/public/ten/calvin_data}
 CALVIN_LEROBOT_DATA_DIR=${CALVIN_LEROBOT_DATA_DIR:-$CALVIN_DATA_STORE/$TIMESTAMP}
 
-CKPT=/inspire/qb-ilm2/project/26summer-camp-10/26220056/starVLA/ten/qwen35_2b_cosmopredict2_gr00t_calvin_abc_multiview_20260519_112310/checkpoints/steps_10000_pytorch_model.pt
-DATASET_PATH=/inspire/qb-ilm2/project/26summer-camp-10/26220056/calvin/dataset/calvin_debug_dataset
-CALVIN_CONFIG_PATH=/inspire/qb-ilm2/project/26summer-camp-10/26220056/calvin/calvin_models/conf
+CKPT=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/qwen35_2b_cosmopredict2_gr00t_calvin_abc_multiview_20260519_112310/checkpoints/steps_10000_pytorch_model.pt
+DATASET_PATH=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/calvin/dataset/calvin_debug_dataset
+CALVIN_CONFIG_PATH=/inspire/qb-ilm2/project/26summer-camp-10/public/ten/calvin/calvin_models/conf
 SOURCE_EVAL_SEQUENCES=$REPO/examples/calvin/eval_files/eval_sequences.json
 
 HOST=127.0.0.1
@@ -32,7 +32,7 @@ UNNORM_KEY=franka
 # old "render on the same GPU as the worker" behavior.
 CALVIN_EGL_GPU=${CALVIN_EGL_GPU:-0}
 CALVIN_EGL_PER_WORKER=${CALVIN_EGL_PER_WORKER:-0}
-CALVIN_SAVE_VIDEO=${CALVIN_SAVE_VIDEO:-0}
+CALVIN_SAVE_VIDEO=${CALVIN_SAVE_VIDEO:-1}
 CALVIN_VIDEO_CAMERA=${CALVIN_VIDEO_CAMERA:-rgb_static}
 CALVIN_PROGRESS_EVERY=${CALVIN_PROGRESS_EVERY:-25}
 
@@ -42,7 +42,7 @@ NUM_WORKERS=${#GPUS[@]}
 
 # 调试时可以设成 10；正式跑全量就改成空：
 # LIMIT_SEQUENCES=""
-LIMIT_SEQUENCES=1000
+LIMIT_SEQUENCES=100
 
 mkdir -p "$LOG_DIR" "$RUN_DIR" "$SPLIT_DIR" "$ACTION_TRACE_DIR" "$CALVIN_LEROBOT_DATA_DIR"
 
@@ -130,7 +130,7 @@ for idx in "${!GPUS[@]}"; do
     mkdir -p "$VIDEO_DIR"
 
     setsid bash -lc "
-source $BASE/env_calvin.sh
+source $REPO/env_calvin.sh
 
 # 每个 worker 用独立工作目录，避免 tmp/calvin/eval_logs 互相覆盖
 cd $WORK_DIR
