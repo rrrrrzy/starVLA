@@ -22,6 +22,7 @@ Exposed API:
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -152,11 +153,40 @@ class PolicyServerWrapper:
                 )
         proc = self._get_processor(effective_key)
 
-        out = self._framework.predict_action(examples=examples, **kwargs)
+        started = time.perf_counter()
+        logging.info(
+            "predict_action start: batch=%d unnorm_key=%s kwargs=%s",
+            len(examples),
+            effective_key,
+            sorted(kwargs.keys()),
+        )
+
+        try:
+            out = self._framework.predict_action(examples=examples, **kwargs)
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            logging.info(
+                "predict_action framework done in %.2fs",
+                time.perf_counter() - started,
+            )
+        except RuntimeError as e:
+            if "CUDA" in str(e) or "cuda" in str(e):
+                logging.exception("CUDA error during inference, attempting to recover: %s", e)
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
+            raise
         normalized = np.asarray(out["normalized_actions"])  # (B, T, D)
 
         unnorm = np.stack(
             [proc.unapply_actions(normalized[b]) for b in range(normalized.shape[0])],
             axis=0,
+        )
+        logging.info(
+            "predict_action done in %.2fs actions_shape=%s",
+            time.perf_counter() - started,
+            unnorm.shape,
         )
         return {"actions": unnorm}

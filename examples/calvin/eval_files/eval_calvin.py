@@ -38,13 +38,18 @@ from calvin_agent.evaluation.utils import (
     get_log_dir,
     print_and_save,
 )
-from moviepy.editor import ImageSequenceClip
 from omegaconf import OmegaConf
 from termcolor import colored
 from tqdm import tqdm
 
 from deployment.model_server.tools import image_tools
 from examples.LIBERO.eval_files.model2libero_interface import ModelClient
+from examples.calvin.eval_files.lerobot_recorder import (
+    CalvinLeRobotSequenceRecorder,
+    build_task_index,
+    normalize_lang,
+)
+from examples.calvin.eval_files.video_utils import RolloutVideoRecorder
 
 # from calvin_env.envs.play_table_env import get_env
 
@@ -54,6 +59,12 @@ os.environ["PYOPENGL_PLATFORM"] = "osmesa"
 os.environ["MUJOCO_GL"] = "osmesa"
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Video recording env vars
+CALVIN_SAVE_VIDEO = os.environ.get("CALVIN_SAVE_VIDEO", "0") == "1"
+CALVIN_VIDEO_CAMERA = os.environ.get("CALVIN_VIDEO_CAMERA", "rgb_static")
+CALVIN_VIDEO_DIR = os.environ.get("CALVIN_VIDEO_DIR", "")
+CALVIN_PROGRESS_EVERY = int(os.environ.get("CALVIN_PROGRESS_EVERY", "25"))
 
 EP_LEN = 360  # Max steps per task
 
@@ -88,6 +99,10 @@ class Args:
     eval_log_dir: str = "tmp/calvin/eval_logs"  # Path to save evaluation logs and videos
     reset: bool = False  # If True, reset robot state between tasks (easier)
     diverse_inst: bool = False  # Use diverse instructions (zero-shot generalization)
+    worker_id: int = -1  # Parallel Calvin worker id, used for action trace records
+    sequence_offset: int = 0  # Global index offset of this worker's first eval sequence
+    action_trace_path: str = ""  # JSONL path for per-sequence task-level action traces
+    lerobot_data_dir: str = ""  # LeRobot v2.1 output root for sequential Calvin test rollouts
 
 
 class CalvinPolicyClient:
@@ -102,10 +117,13 @@ class CalvinPolicyClient:
         pretrained_path: str = "",
         unnorm_key: str = "",
     ):
+        # New ModelClient API: checkpoint is loaded by the StarVLA policy server.
+        # The client only connects to the websocket server and sends observations.
         self.client = ModelClient(
+            unnorm_key=(unnorm_key or None),
+            policy_setup="franka",
             host=host,
             port=port,
-            unnorm_key=(unnorm_key or None),
         )
         self.resize_size = resize_size
         self.replan_steps = replan_steps
@@ -190,6 +208,44 @@ def load_lang_task(dataset_path: str) -> dict:
     return val_annotations, task_oracle
 
 
+def write_action_trace(action_trace_path: str, record: dict):
+    if not action_trace_path:
+        return
+    path = Path(action_trace_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def build_not_attempted_task(subtask_i: int, subtask: str, val_annotations, sequence_i: int, diverse_inst: bool):
+    if diverse_inst:
+        lang_annotation = val_annotations[sequence_i][subtask_i]
+    else:
+        lang_annotation = val_annotations[subtask][0]
+    lang_annotation = lang_annotation.split("\n")[0].replace("\u2019", "'")
+    return {
+        "task_no": subtask_i + 1,
+        "subtask": subtask,
+        "lang_annotation": lang_annotation,
+        "status": "not_attempted",
+        "success": False,
+        "steps": 0,
+        "elapsed_sec": 0.0,
+    }
+
+
+def get_lang_annotation(subtask_i: int, subtask: str, val_annotations, sequence_i: int, diverse_inst: bool):
+    if diverse_inst:
+        return normalize_lang(val_annotations[sequence_i][subtask_i])
+    return normalize_lang(val_annotations[subtask][0])
+
+
+def get_task_index(subtask_i: int, subtask: str, task_to_index: dict, sequence_i: int, diverse_inst: bool):
+    if diverse_inst:
+        return sequence_i * 5 + subtask_i
+    return task_to_index[subtask]
+
+
 def evaluate_policy_ddp(
     policy,
     env,
@@ -202,7 +258,10 @@ def evaluate_policy_ddp(
     create_plan_tsne=False,
     reset=False,
     diverse_inst=False,
-    seed=0,
+    worker_id=-1,
+    sequence_offset=0,
+    action_trace_path="",
+    lerobot_data_dir="",
 ):
     """
     Run this function to evaluate a model on the CALVIN challenge.
@@ -228,6 +287,7 @@ def evaluate_policy_ddp(
             val_annotations = json.load(f)
     else:
         val_annotations = OmegaConf.load(conf_dir / "annotations/new_playtable_validation.yaml")
+    task_to_index, _ = build_task_index(val_annotations)
 
     eval_log_dir = get_log_dir(eval_log_dir)
     with open(eval_sequences_path, "r") as f:
@@ -254,27 +314,49 @@ def evaluate_policy_ddp(
     results = []
     plans = defaultdict(list)
     local_sequence_i = 0
-    base_sequence_i = 0  # device_id * interval_len
 
     if not debug:
         eval_sequences = tqdm(eval_sequences, position=0, leave=True)
 
     for initial_state, eval_sequence in eval_sequences:
-        result = evaluate_sequence(
+        sequence_i = sequence_offset + local_sequence_i
+        sequence_recorder = CalvinLeRobotSequenceRecorder(
+            lerobot_data_dir,
+            worker_id=worker_id,
+            enabled=bool(lerobot_data_dir),
+        )
+        sequence_recorder.start_sequence(sequence_i, local_sequence_i, initial_state, eval_sequence)
+        result, task_records = evaluate_sequence(
             env,
             policy,
             task_oracle,
             initial_state,
             eval_sequence,
             val_annotations,
+            task_to_index,
             plans,
             debug,
             eval_log_dir,
-            base_sequence_i + local_sequence_i,
+            sequence_i,
             reset=reset,
             diverse_inst=diverse_inst,
+            sequence_recorder=sequence_recorder,
         )
         results.append(result)
+        sequence_recorder.save_sequence(result)
+        write_action_trace(
+            action_trace_path,
+            {
+                "worker_id": worker_id,
+                "round": sequence_i + 1,
+                "sequence_index_global": sequence_i,
+                "sequence_index_local": local_sequence_i,
+                "initial_state": initial_state,
+                "tasks": task_records,
+                "success_count": result,
+                "completed": result == len(eval_sequence),
+            },
+        )
         if not debug:
             eval_sequences.set_description(
                 " ".join([f"{i + 1}/5 : {v * 100:.1f}% |" for i, v in enumerate(count_success(results))]) + "|"
@@ -307,12 +389,14 @@ def evaluate_sequence(
     initial_state,
     eval_sequence,
     val_annotations,
+    task_to_index,
     plans,
     debug,
     eval_log_dir="",
     sequence_i=-1,
     reset=False,
     diverse_inst=False,
+    sequence_recorder=None,
 ):
     """
     Evaluates a sequence of language instructions.
@@ -321,6 +405,7 @@ def evaluate_sequence(
     env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
 
     success_counter = 0
+    task_records = []
     if debug:
         time.sleep(1)
         print()
@@ -329,7 +414,7 @@ def evaluate_sequence(
         print("Subtask: ", end="")
     for subtask_i, subtask in enumerate(eval_sequence):
         if reset:
-            success = rollout(
+            rollout_record = rollout(
                 env,
                 policy,
                 task_checker,
@@ -343,9 +428,11 @@ def evaluate_sequence(
                 robot_obs=robot_obs,
                 scene_obs=scene_obs,
                 diverse_inst=diverse_inst,
+                task_to_index=task_to_index,
+                sequence_recorder=sequence_recorder,
             )
         else:
-            success = rollout(
+            rollout_record = rollout(
                 env,
                 policy,
                 task_checker,
@@ -357,12 +444,47 @@ def evaluate_sequence(
                 subtask_i,
                 sequence_i,
                 diverse_inst=diverse_inst,
+                task_to_index=task_to_index,
+                sequence_recorder=sequence_recorder,
             )
+        task_records.append(rollout_record)
+        success = rollout_record["success"]
         if success:
             success_counter += 1
         else:
-            return success_counter
-    return success_counter
+            for future_subtask_i, future_subtask in enumerate(eval_sequence[subtask_i + 1 :], start=subtask_i + 1):
+                task_records.append(
+                    build_not_attempted_task(
+                        future_subtask_i,
+                        future_subtask,
+                        val_annotations,
+                        sequence_i,
+                        diverse_inst,
+                    )
+                )
+                if sequence_recorder is not None:
+                    lang_annotation = get_lang_annotation(
+                        future_subtask_i,
+                        future_subtask,
+                        val_annotations,
+                        sequence_i,
+                        diverse_inst,
+                    )
+                    task_index = get_task_index(
+                        future_subtask_i,
+                        future_subtask,
+                        task_to_index,
+                        sequence_i,
+                        diverse_inst,
+                    )
+                    sequence_recorder.add_not_attempted_segment(
+                        future_subtask_i,
+                        future_subtask,
+                        task_index,
+                        lang_annotation,
+                    )
+            return success_counter, task_records
+    return success_counter, task_records
 
 
 def rollout(
@@ -379,6 +501,8 @@ def rollout(
     robot_obs=None,
     scene_obs=None,
     diverse_inst=False,
+    task_to_index=None,
+    sequence_recorder=None,
 ):
     """
     Run the actual rollout on one subtask (which is one natural language instruction).
@@ -390,32 +514,59 @@ def rollout(
         env.reset(robot_obs=robot_obs, scene_obs=scene_obs)
     obs = env.get_obs()
     # get lang annotation for subtask
-    if diverse_inst:
-        lang_annotation = val_annotations[sequence_i][subtask_i]
-    else:
-        lang_annotation = val_annotations[subtask][0]
-    lang_annotation = lang_annotation.split("\n")[0]
-    if "\u2019" in lang_annotation:
-        lang_annotation.replace("\u2019", "'")
+    lang_annotation = get_lang_annotation(subtask_i, subtask, val_annotations, sequence_i, diverse_inst)
+    task_index = get_task_index(subtask_i, subtask, task_to_index or {}, sequence_i, diverse_inst)
+    segment = None
+    if sequence_recorder is not None:
+        segment = sequence_recorder.start_segment(subtask_i, subtask, task_index, lang_annotation)
     policy.reset()
     start_info = env.get_info()
+    rollout_start = time.time()
 
-    if debug:
-        img_queue = []
+    # Determine whether to record video for this rollout
+    record_video = CALVIN_SAVE_VIDEO or debug
+    if CALVIN_VIDEO_DIR:
+        video_dir = CALVIN_VIDEO_DIR
+    elif eval_log_dir:
+        video_dir = os.path.join(eval_log_dir, "videos")
+    else:
+        video_dir = None
+    recorder = RolloutVideoRecorder(
+        save_dir=video_dir,
+        fps=30,
+        camera=CALVIN_VIDEO_CAMERA,
+        enabled=record_video and video_dir is not None,
+    )
+    recorder.add_obs(obs)
 
     for step in range(EP_LEN):
+        if CALVIN_PROGRESS_EVERY > 0 and step % CALVIN_PROGRESS_EVERY == 0:
+            print(
+                f"[rollout] seq={sequence_i} sub={subtask_i} task={subtask} step={step} begin",
+                flush=True,
+            )
 
+        t_policy = time.time()
         action = policy.step(obs, lang_annotation)
+        policy_dt = time.time() - t_policy
 
         # Ensure action is writable (Calvin env modifies it in-place)
         if not action.flags.writeable:
             action = np.array(action, copy=True)
         action[-1] = 1 if action[-1] > 0 else -1
+        if sequence_recorder is not None:
+            sequence_recorder.add_step(obs, action, task_index)
 
+        t_env = time.time()
         obs, _, _, current_info = env.step(action)
-        if debug:
-            img_copy = copy.deepcopy(obs["rgb_obs"]["rgb_static"])
-            img_queue.append(img_copy)
+        env_dt = time.time() - t_env
+        if CALVIN_PROGRESS_EVERY > 0 and step % CALVIN_PROGRESS_EVERY == 0:
+            print(
+                f"[rollout] seq={sequence_i} sub={subtask_i} task={subtask} step={step} "
+                f"policy_dt={policy_dt:.3f}s env_dt={env_dt:.3f}s",
+                flush=True,
+            )
+        recorder.add_obs(obs)
         if step == 0:
             # for tsne plot, only if available
             collect_plan(policy, plans, subtask)
@@ -425,18 +576,43 @@ def rollout(
         if len(current_task_info) > 0:
             if debug:
                 print(colored("success", "green"), end=" ")
-                img_clip = ImageSequenceClip(img_queue, fps=30)
-                img_clip.write_gif(os.path.join(eval_log_dir, f"{sequence_i}-{subtask_i}-{subtask}-succ.gif"), fps=30)
-            return True
+            recorder.save(f"seq{sequence_i}_sub{subtask_i}_{subtask}_succ")
+            if sequence_recorder is not None:
+                sequence_recorder.finish_segment(segment, success=True, status="success")
+            return {
+                "task_no": subtask_i + 1,
+                "subtask": subtask,
+                "lang_annotation": lang_annotation,
+                "status": "success",
+                "success": True,
+                "steps": step + 1,
+                "elapsed_sec": round(time.time() - rollout_start, 3),
+            }
     if debug:
         print(colored("fail", "red"), end=" ")
-        img_clip = ImageSequenceClip(img_queue, fps=30)
-        img_clip.write_gif(os.path.join(eval_log_dir, f"{sequence_i}-{subtask_i}-{subtask}-fail.gif"), fps=30)
-    return False
+    recorder.save(f"seq{sequence_i}_sub{subtask_i}_{subtask}_fail")
+    if sequence_recorder is not None:
+        sequence_recorder.finish_segment(segment, success=False, status="fail")
+    return {
+        "task_no": subtask_i + 1,
+        "subtask": subtask,
+        "lang_annotation": lang_annotation,
+        "status": "fail",
+        "success": False,
+        "steps": EP_LEN,
+        "elapsed_sec": round(time.time() - rollout_start, 3),
+    }
 
 
 def main(args: Args):
     # args = tyro.cli(Args)
+    print(
+        f"[calvin-config] CALVIN_SAVE_VIDEO={CALVIN_SAVE_VIDEO} "
+        f"CALVIN_VIDEO_DIR={CALVIN_VIDEO_DIR} "
+        f"CALVIN_VIDEO_CAMERA={CALVIN_VIDEO_CAMERA} "
+        f"CALVIN_PROGRESS_EVERY={CALVIN_PROGRESS_EVERY}",
+        flush=True,
+    )
 
     policy = CalvinPolicyClient(
         args.host,
@@ -460,7 +636,10 @@ def main(args: Args):
         args.create_plan_tsne,
         args.reset,
         args.diverse_inst,
-        seed=args.seed,
+        args.worker_id,
+        args.sequence_offset,
+        args.action_trace_path,
+        args.lerobot_data_dir,
     )
 
 
